@@ -2,6 +2,6 @@ services:
   - type: web
     name: tecky-compile-server
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && arduino-cli core update-index && arduino-cli core install arduino:avr
     startCommand: python server.py
     plan: free
