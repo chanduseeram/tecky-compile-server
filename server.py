@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 import subprocess
 import os
 import base64
@@ -8,17 +8,41 @@ import tempfile
 
 app = Flask(__name__)
 
-# ── Config ──────────────────────────────────────────────────────
-# Path to arduino-cli executable
-# Windows: change to full path like "C:/arduino-cli/arduino-cli.exe"
-# Mac/Linux: just "arduino-cli" if it's in PATH
 ARDUINO_CLI = "arduino-cli"
-
-# Temp folder for sketch files
 BUILD_DIR = tempfile.gettempdir()
 
-# ── Health check ─────────────────────────────────────────────────
-@app.route('/ping', methods=['GET'])
+# ── One-time setup: install arduino:avr platform on server start ──
+def setup_arduino_cli():
+    print("[SETUP] Updating arduino-cli index...")
+    subprocess.run([ARDUINO_CLI, "core", "update-index"], capture_output=True, timeout=60)
+
+    print("[SETUP] Installing arduino:avr platform...")
+    result = subprocess.run(
+        [ARDUINO_CLI, "core", "install", "arduino:avr"],
+        capture_output=True, text=True, timeout=300
+    )
+    print(f"[SETUP] arduino:avr install: {result.returncode}")
+    print(f"[SETUP] {result.stdout}")
+    if result.returncode != 0:
+        print(f"[SETUP] WARN: {result.stderr}")
+
+    print("[SETUP] Installing esp32 platform...")
+    subprocess.run(
+        [ARDUINO_CLI, "core", "install", "esp32:esp32",
+         "--additional-urls",
+         "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"],
+        capture_output=True, timeout=300
+    )
+    print("[SETUP] Done.")
+
+# Run setup at startup
+try:
+    setup_arduino_cli()
+except Exception as e:
+    print(f"[SETUP] Setup error (non-fatal): {e}")
+
+# ── Health / ping ─────────────────────────────────────────────────
+@app.route('/ping',   methods=['GET'])
 def ping():
     return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
 
@@ -26,12 +50,15 @@ def ping():
 def health():
     return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
 
-# ── Compile endpoint ─────────────────────────────────────────────
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
+
+# ── Compile ───────────────────────────────────────────────────────
 @app.route('/compile', methods=['POST'])
 def compile_code():
     data = request.get_json()
 
-    # Validate input
     if not data:
         return jsonify({"success": False, "error": "No JSON body"}), 400
     if 'code' not in data:
@@ -39,134 +66,93 @@ def compile_code():
     if 'board' not in data:
         return jsonify({"success": False, "error": "Missing 'board' field"}), 400
 
-    code      = data['code']    # Arduino .ino source code string
-    board     = data['board']   # e.g. "arduino:avr:uno"
+    code      = data['code']
+    board     = data['board']
     proj_name = data.get('projectName', 'RobotSketch')
 
-    # Sanitize project name
     proj_name = ''.join(c for c in proj_name if c.isalnum() or c == '_')
     if not proj_name:
         proj_name = 'RobotSketch'
 
-    # Create unique temp folder for this compile job
     job_id      = str(uuid.uuid4())[:8]
-    # FIX: sketch_name = full folder name (proj_name + job_id)
-    #      Arduino CLI requires: folder name == .ino filename (without extension)
-    sketch_name = f"{proj_name}_{job_id}"          # e.g. "RobotSketch_a1b2c3d4"
+    # FIX: sketch_name = folder name; .ino filename MUST match folder name
+    sketch_name = f"{proj_name}_{job_id}"
     sketch_dir  = os.path.join(BUILD_DIR, sketch_name)
     output_dir  = os.path.join(sketch_dir, "build")
 
     try:
-        # Create sketch folder — folder name must match .ino filename
         os.makedirs(sketch_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        # ── FIX: .ino filename MUST match folder name exactly ──────────
-        # BEFORE (broken): f"{proj_name}.ino"     → "RobotSketch.ino"
-        # AFTER  (fixed):  f"{sketch_name}.ino"   → "RobotSketch_a1b2c3d4.ino"
-        # Arduino CLI error if they don't match: "main file missing from sketch"
+        # .ino filename matches folder name exactly
         ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
-        print(f"[COMPILE] Board: {board}")
-        print(f"[COMPILE] Sketch: {ino_path}")
+        print(f"[COMPILE] Board={board} Sketch={ino_path}")
 
-        # Run Arduino CLI compile
         result = subprocess.run(
-            [
-                ARDUINO_CLI, "compile",
-                "--fqbn", board,
-                "--output-dir", output_dir,
-                sketch_dir
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120  # 2 min max
+            [ARDUINO_CLI, "compile",
+             "--fqbn", board,
+             "--output-dir", output_dir,
+             sketch_dir],
+            capture_output=True, text=True, timeout=120
         )
 
-        print(f"[COMPILE] Return code: {result.returncode}")
-        print(f"[COMPILE] STDOUT: {result.stdout}")
-        print(f"[COMPILE] STDERR: {result.stderr}")
+        print(f"[COMPILE] rc={result.returncode}")
+        print(f"[COMPILE] stdout={result.stdout}")
+        print(f"[COMPILE] stderr={result.stderr}")
 
         if result.returncode != 0:
-            # Compile failed — return error message
             error_msg = result.stderr or result.stdout or "Unknown compile error"
-            return jsonify({
-                "success": False,
-                "error": clean_error(error_msg)
-            }), 200  # 200 so mobile can read JSON body
+            return jsonify({"success": False, "error": clean_error(error_msg)}), 200
 
-        # Find compiled output file
-        hex_file = find_output_file(output_dir, board)
-
+        hex_file = find_output_file(output_dir)
         if not hex_file:
-            return jsonify({
-                "success": False,
-                "error": "Compile succeeded but output file not found"
-            }), 200
+            return jsonify({"success": False,
+                            "error": "Compile succeeded but hex file not found"}), 200
 
-        # Read and base64-encode the hex/bin file
         with open(hex_file, 'rb') as f:
             file_bytes = f.read()
 
-        file_b64      = base64.b64encode(file_bytes).decode('utf-8')
-        file_type     = "hex" if hex_file.endswith(".hex") else "bin"
-        file_size     = len(file_bytes)
+        file_b64  = base64.b64encode(file_bytes).decode('utf-8')
+        file_type = "hex" if hex_file.endswith(".hex") else "bin"
 
         return jsonify({
-            "success":   True,
-            "board":     board,
-            "fileType":  file_type,
-            "fileSize":  file_size,
-            "fileName":  f"{sketch_name}.{file_type}",
-            "fileData":  file_b64,
-            "message":   f"Compiled successfully ({file_size} bytes)"
+            "success":  True,
+            "board":    board,
+            "fileType": file_type,
+            "fileSize": len(file_bytes),
+            "fileName": f"{sketch_name}.{file_type}",
+            "fileData": file_b64,
+            "message":  f"Compiled successfully ({len(file_bytes)} bytes)"
         })
 
     except subprocess.TimeoutExpired:
-        return jsonify({
-            "success": False,
-            "error": "Compile timeout (>2 min). Check Arduino CLI installation."
-        }), 200
-
+        return jsonify({"success": False,
+                        "error": "Compile timeout (>2 min)"}), 200
     except FileNotFoundError:
-        return jsonify({
-            "success": False,
-            "error": f"arduino-cli not found. Install it and make sure it's in PATH."
-        }), 200
-
+        return jsonify({"success": False,
+                        "error": "arduino-cli not found on server"}), 200
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "error": str(e)}), 500
     finally:
-        # Clean up temp files
         try:
             shutil.rmtree(sketch_dir, ignore_errors=True)
         except:
             pass
 
 
-# ── Helper: find .hex or .bin in output dir ──────────────────────
-def find_output_file(output_dir, board):
-    # Arduino UNO → .hex
-    # ESP32      → .bin
-    preferred = [".hex", ".bin", ".elf"]
-
-    for ext in preferred:
+def find_output_file(output_dir):
+    for ext in [".hex", ".bin", ".elf"]:
         for fname in os.listdir(output_dir):
             if fname.endswith(ext):
                 return os.path.join(output_dir, fname)
     return None
 
 
-# ── Helper: clean Arduino CLI error messages ─────────────────────
 def clean_error(raw):
     lines = raw.strip().split('\n')
-    # Filter out internal path noise, keep useful lines
     useful = []
     for line in lines:
         line = line.strip()
@@ -175,14 +161,10 @@ def clean_error(raw):
         if 'arduino-cli' in line.lower() and 'error' not in line.lower():
             continue
         useful.append(line)
-    return '\n'.join(useful[:20])  # max 20 lines
+    return '\n'.join(useful[:20])
 
 
-# ── Run server ───────────────────────────────────────────────────
 if __name__ == '__main__':
-    print("=" * 50)
-    print("  Tecky Compile Server")
-    print("  Running on http://0.0.0.0:5000")
-    print("  Mobile app connect to: http://<YOUR_PC_IP>:5000")
-    print("=" * 50)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    print(f"Starting on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
