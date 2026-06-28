@@ -11,38 +11,8 @@ app = Flask(__name__)
 ARDUINO_CLI = "arduino-cli"
 BUILD_DIR = tempfile.gettempdir()
 
-# ── One-time setup: install arduino:avr platform on server start ──
-def setup_arduino_cli():
-    print("[SETUP] Updating arduino-cli index...")
-    subprocess.run([ARDUINO_CLI, "core", "update-index"], capture_output=True, timeout=60)
-
-    print("[SETUP] Installing arduino:avr platform...")
-    result = subprocess.run(
-        [ARDUINO_CLI, "core", "install", "arduino:avr"],
-        capture_output=True, text=True, timeout=300
-    )
-    print(f"[SETUP] arduino:avr install: {result.returncode}")
-    print(f"[SETUP] {result.stdout}")
-    if result.returncode != 0:
-        print(f"[SETUP] WARN: {result.stderr}")
-
-    print("[SETUP] Installing esp32 platform...")
-    subprocess.run(
-        [ARDUINO_CLI, "core", "install", "esp32:esp32",
-         "--additional-urls",
-         "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"],
-        capture_output=True, timeout=300
-    )
-    print("[SETUP] Done.")
-
-# Run setup at startup
-try:
-    setup_arduino_cli()
-except Exception as e:
-    print(f"[SETUP] Setup error (non-fatal): {e}")
-
 # ── Health / ping ─────────────────────────────────────────────────
-@app.route('/ping',   methods=['GET'])
+@app.route('/ping', methods=['GET'])
 def ping():
     return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
 
@@ -70,13 +40,13 @@ def compile_code():
     board     = data['board']
     proj_name = data.get('projectName', 'RobotSketch')
 
+    # Sanitize
     proj_name = ''.join(c for c in proj_name if c.isalnum() or c == '_')
     if not proj_name:
         proj_name = 'RobotSketch'
 
     job_id      = str(uuid.uuid4())[:8]
-    # FIX: sketch_name = folder name; .ino filename MUST match folder name
-    sketch_name = f"{proj_name}_{job_id}"
+    sketch_name = f"{proj_name}_{job_id}"        # e.g. RobotSketch_a1b2c3d4
     sketch_dir  = os.path.join(BUILD_DIR, sketch_name)
     output_dir  = os.path.join(sketch_dir, "build")
 
@@ -84,12 +54,14 @@ def compile_code():
         os.makedirs(sketch_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        # .ino filename matches folder name exactly
+        # FIX: .ino filename MUST match folder name exactly
+        # Folder = RobotSketch_a1b2c3d4
+        # File   = RobotSketch_a1b2c3d4.ino  ← must be same
         ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
-        print(f"[COMPILE] Board={board} Sketch={ino_path}")
+        print(f"[COMPILE] Board={board}  Sketch={ino_path}")
 
         result = subprocess.run(
             [ARDUINO_CLI, "compile",
@@ -166,5 +138,5 @@ def clean_error(raw):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"Starting on port {port}")
+    print(f"[SERVER] Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
