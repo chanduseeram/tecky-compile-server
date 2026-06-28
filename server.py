@@ -22,6 +22,10 @@ BUILD_DIR = tempfile.gettempdir()
 def ping():
     return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
 
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
+
 # ── Compile endpoint ─────────────────────────────────────────────
 @app.route('/compile', methods=['POST'])
 def compile_code():
@@ -45,17 +49,23 @@ def compile_code():
         proj_name = 'RobotSketch'
 
     # Create unique temp folder for this compile job
-    job_id     = str(uuid.uuid4())[:8]
-    sketch_dir = os.path.join(BUILD_DIR, f"{proj_name}_{job_id}")
-    output_dir = os.path.join(sketch_dir, "build")
+    job_id      = str(uuid.uuid4())[:8]
+    # FIX: sketch_name = full folder name (proj_name + job_id)
+    #      Arduino CLI requires: folder name == .ino filename (without extension)
+    sketch_name = f"{proj_name}_{job_id}"          # e.g. "RobotSketch_a1b2c3d4"
+    sketch_dir  = os.path.join(BUILD_DIR, sketch_name)
+    output_dir  = os.path.join(sketch_dir, "build")
 
     try:
         # Create sketch folder — folder name must match .ino filename
         os.makedirs(sketch_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        # Write .ino file
-        ino_path = os.path.join(sketch_dir, f"{proj_name}.ino")
+        # ── FIX: .ino filename MUST match folder name exactly ──────────
+        # BEFORE (broken): f"{proj_name}.ino"     → "RobotSketch.ino"
+        # AFTER  (fixed):  f"{sketch_name}.ino"   → "RobotSketch_a1b2c3d4.ino"
+        # Arduino CLI error if they don't match: "main file missing from sketch"
+        ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
@@ -109,7 +119,7 @@ def compile_code():
             "board":     board,
             "fileType":  file_type,
             "fileSize":  file_size,
-            "fileName":  f"{proj_name}.{file_type}",
+            "fileName":  f"{sketch_name}.{file_type}",
             "fileData":  file_b64,
             "message":   f"Compiled successfully ({file_size} bytes)"
         })
