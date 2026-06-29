@@ -8,93 +8,101 @@ import tempfile
 
 app = Flask(__name__)
 
-# Use project-relative folders — persist from build to runtime on Render
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ARDUINO_CLI = os.path.join(BASE_DIR, "bin", "arduino-cli")
-ARDUINO_CONFIG = os.path.join(BASE_DIR, "arduino_data", "arduino-cli.yaml")
+DATA_DIR = os.path.join(BASE_DIR, "arduino_data")
 
 if not os.path.exists(ARDUINO_CLI):
-    ARDUINO_CLI = "arduino-cli"  # local dev fallback
+    ARDUINO_CLI = "arduino-cli"
 
 BUILD_DIR = tempfile.gettempdir()
 
-print(f"[SERVER] arduino-cli path: {ARDUINO_CLI}")
-print(f"[SERVER] arduino-cli exists: {os.path.exists(ARDUINO_CLI)}")
-print(f"[SERVER] config path: {ARDUINO_CONFIG}")
-print(f"[SERVER] config exists: {os.path.exists(ARDUINO_CONFIG)}")
+def run_cli(args, timeout=300):
+    env = os.environ.copy()
+    env["ARDUINO_DATA_DIR"]      = DATA_DIR
+    env["ARDUINO_DOWNLOADS_DIR"] = os.path.join(DATA_DIR, "staging")
+    env["ARDUINO_USER_DIR"]      = os.path.join(DATA_DIR, "user")
+    return subprocess.run(
+        [ARDUINO_CLI] + args,
+        capture_output=True, text=True,
+        timeout=timeout, env=env
+    )
 
+def ensure_platform():
+    """Install arduino:avr if not already installed — runs at startup"""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(os.path.join(DATA_DIR, "staging"), exist_ok=True)
+    os.makedirs(os.path.join(DATA_DIR, "user"), exist_ok=True)
 
-def get_cli_cmd(extra_args):
-    """Build arduino-cli command with config file if available"""
-    cmd = [ARDUINO_CLI]
-    if os.path.exists(ARDUINO_CONFIG):
-        cmd += ["--config-file", ARDUINO_CONFIG]
-    cmd += extra_args
-    return cmd
+    # Check if already installed
+    r = run_cli(["core", "list"])
+    if "arduino:avr" in r.stdout:
+        print("[SETUP] arduino:avr already installed ✅")
+        return True
 
+    print("[SETUP] arduino:avr not found — installing now...")
+    r = run_cli(["core", "update-index"], timeout=60)
+    print(f"[SETUP] update-index: {r.returncode}")
 
-# ── Health ────────────────────────────────────────────────────────
+    r = run_cli(["core", "install", "arduino:avr"], timeout=300)
+    print(f"[SETUP] install arduino:avr rc={r.returncode}")
+    print(f"[SETUP] stdout={r.stdout[-300:]}")
+    print(f"[SETUP] stderr={r.stderr[-300:]}")
+
+    if r.returncode == 0:
+        print("[SETUP] arduino:avr installed successfully ✅")
+        return True
+    else:
+        print("[SETUP] arduino:avr install FAILED ❌")
+        return False
+
+# Run at startup
+print(f"[SERVER] arduino-cli: {ARDUINO_CLI}")
+print(f"[SERVER] exists: {os.path.exists(ARDUINO_CLI)}")
+print(f"[SERVER] data dir: {DATA_DIR}")
+platform_ready = ensure_platform()
+print(f"[SERVER] platform ready: {platform_ready}")
+
+# ── Routes ────────────────────────────────────────────────────────
 @app.route('/ping', methods=['GET'])
 def ping():
+    return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
+
+@app.route('/', methods=['GET'])
+def root():
     return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         "status": "ok",
-        "message": "Tecky Compile Server running",
-        "arduino_cli": ARDUINO_CLI,
         "arduino_cli_exists": os.path.exists(ARDUINO_CLI),
-        "config_exists": os.path.exists(ARDUINO_CONFIG)
+        "platform_ready": platform_ready,
+        "data_dir": DATA_DIR
     })
 
-@app.route('/', methods=['GET'])
-def root():
-    return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
-
-# ── Debug ─────────────────────────────────────────────────────────
 @app.route('/debug', methods=['GET'])
 def debug():
-    # Check core list
-    try:
-        result = subprocess.run(
-            get_cli_cmd(["core", "list"]),
-            capture_output=True, text=True, timeout=30
-        )
-        cores = result.stdout + result.stderr
-    except Exception as e:
-        cores = str(e)
+    r = run_cli(["core", "list"])
+    cores = r.stdout + r.stderr
 
-    # Check bin folder
-    bin_dir = os.path.join(BASE_DIR, "bin")
     try:
-        bin_files = os.listdir(bin_dir)
+        data_files = os.listdir(DATA_DIR)
     except:
-        bin_files = "bin folder not found"
+        data_files = "not found"
 
-    # Check arduino_data folder
-    data_dir = os.path.join(BASE_DIR, "arduino_data")
-    try:
-        data_files = os.listdir(data_dir)
-    except:
-        data_files = "arduino_data folder not found"
-
-    # Check arduino_data/packages folder
-    pkg_dir = os.path.join(BASE_DIR, "arduino_data", "packages")
+    pkg_dir = os.path.join(DATA_DIR, "packages")
     try:
         pkg_files = os.listdir(pkg_dir)
     except:
-        pkg_files = "packages folder not found"
+        pkg_files = "not found"
 
     return jsonify({
-        "arduino_cli_path": ARDUINO_CLI,
         "arduino_cli_exists": os.path.exists(ARDUINO_CLI),
-        "config_path": ARDUINO_CONFIG,
-        "config_exists": os.path.exists(ARDUINO_CONFIG),
-        "cores_installed": cores,
-        "bin_folder": bin_files,
-        "arduino_data_folder": data_files,
-        "packages_folder": pkg_files
+        "platform_ready": platform_ready,
+        "cores": cores,
+        "data_dir_contents": data_files,
+        "packages": pkg_files
     })
 
 # ── Compile ───────────────────────────────────────────────────────
@@ -126,24 +134,25 @@ def compile_code():
         os.makedirs(sketch_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        # .ino filename MUST match folder name exactly
         ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
-        print(f"[COMPILE] CLI={ARDUINO_CLI}")
-        print(f"[COMPILE] Board={board}")
-        print(f"[COMPILE] Sketch={ino_path}")
+        print(f"[COMPILE] board={board} sketch={ino_path}")
+
+        env = os.environ.copy()
+        env["ARDUINO_DATA_DIR"]      = DATA_DIR
+        env["ARDUINO_DOWNLOADS_DIR"] = os.path.join(DATA_DIR, "staging")
+        env["ARDUINO_USER_DIR"]      = os.path.join(DATA_DIR, "user")
 
         result = subprocess.run(
-            get_cli_cmd(["compile", "--fqbn", board,
-                         "--output-dir", output_dir, sketch_dir]),
-            capture_output=True, text=True, timeout=120
+            [ARDUINO_CLI, "compile", "--fqbn", board,
+             "--output-dir", output_dir, sketch_dir],
+            capture_output=True, text=True, timeout=120, env=env
         )
 
         print(f"[COMPILE] rc={result.returncode}")
-        print(f"[COMPILE] stdout={result.stdout[:500]}")
-        print(f"[COMPILE] stderr={result.stderr[:500]}")
+        print(f"[COMPILE] stderr={result.stderr[:300]}")
 
         if result.returncode != 0:
             error_msg = result.stderr or result.stdout or "Unknown compile error"
