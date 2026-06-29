@@ -157,3 +157,33 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"[SERVER] Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
+
+
+
+@app.route('/debug', methods=['GET'])
+def debug():
+    import subprocess
+    # Check core list
+    try:
+        result = subprocess.run(
+            [ARDUINO_CLI, "core", "list"],
+            capture_output=True, text=True, timeout=30
+        )
+        cores = result.stdout + result.stderr
+    except Exception as e:
+        cores = str(e)
+
+    # Check bin folder contents
+    bin_dir = os.path.join(BASE_DIR, "bin")
+    try:
+        bin_files = os.listdir(bin_dir)
+    except:
+        bin_files = "bin folder not found"
+
+    return jsonify({
+        "arduino_cli_path": ARDUINO_CLI,
+        "arduino_cli_exists": os.path.exists(ARDUINO_CLI),
+        "cores_installed": cores,
+        "bin_folder": bin_files
+    })
