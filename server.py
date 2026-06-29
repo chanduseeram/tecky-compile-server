@@ -8,9 +8,10 @@ import tempfile
 
 app = Flask(__name__)
 
-# Use project-relative bin folder — persists from build to runtime on Render
+# Use project-relative folders — persist from build to runtime on Render
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ARDUINO_CLI = os.path.join(BASE_DIR, "bin", "arduino-cli")
+ARDUINO_CONFIG = os.path.join(BASE_DIR, "arduino_data", "arduino-cli.yaml")
 
 if not os.path.exists(ARDUINO_CLI):
     ARDUINO_CLI = "arduino-cli"  # local dev fallback
@@ -19,20 +20,32 @@ BUILD_DIR = tempfile.gettempdir()
 
 print(f"[SERVER] arduino-cli path: {ARDUINO_CLI}")
 print(f"[SERVER] arduino-cli exists: {os.path.exists(ARDUINO_CLI)}")
+print(f"[SERVER] config path: {ARDUINO_CONFIG}")
+print(f"[SERVER] config exists: {os.path.exists(ARDUINO_CONFIG)}")
 
-# ── Health / ping ─────────────────────────────────────────────────
+
+def get_cli_cmd(extra_args):
+    """Build arduino-cli command with config file if available"""
+    cmd = [ARDUINO_CLI]
+    if os.path.exists(ARDUINO_CONFIG):
+        cmd += ["--config-file", ARDUINO_CONFIG]
+    cmd += extra_args
+    return cmd
+
+
+# ── Health ────────────────────────────────────────────────────────
 @app.route('/ping', methods=['GET'])
 def ping():
     return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
 
 @app.route('/health', methods=['GET'])
 def health():
-    cli_exists = os.path.exists(ARDUINO_CLI)
     return jsonify({
         "status": "ok",
         "message": "Tecky Compile Server running",
         "arduino_cli": ARDUINO_CLI,
-        "arduino_cli_exists": cli_exists
+        "arduino_cli_exists": os.path.exists(ARDUINO_CLI),
+        "config_exists": os.path.exists(ARDUINO_CONFIG)
     })
 
 @app.route('/', methods=['GET'])
@@ -45,33 +58,43 @@ def debug():
     # Check core list
     try:
         result = subprocess.run(
-            [ARDUINO_CLI, "core", "list"],
+            get_cli_cmd(["core", "list"]),
             capture_output=True, text=True, timeout=30
         )
         cores = result.stdout + result.stderr
     except Exception as e:
         cores = str(e)
 
-    # Check bin folder contents
+    # Check bin folder
     bin_dir = os.path.join(BASE_DIR, "bin")
     try:
         bin_files = os.listdir(bin_dir)
     except:
         bin_files = "bin folder not found"
 
-    # Check arduino data dir
-    data_dir = os.path.join(BASE_DIR, ".arduino15")
+    # Check arduino_data folder
+    data_dir = os.path.join(BASE_DIR, "arduino_data")
     try:
         data_files = os.listdir(data_dir)
     except:
-        data_files = ".arduino15 folder not found"
+        data_files = "arduino_data folder not found"
+
+    # Check arduino_data/packages folder
+    pkg_dir = os.path.join(BASE_DIR, "arduino_data", "packages")
+    try:
+        pkg_files = os.listdir(pkg_dir)
+    except:
+        pkg_files = "packages folder not found"
 
     return jsonify({
         "arduino_cli_path": ARDUINO_CLI,
         "arduino_cli_exists": os.path.exists(ARDUINO_CLI),
+        "config_path": ARDUINO_CONFIG,
+        "config_exists": os.path.exists(ARDUINO_CONFIG),
         "cores_installed": cores,
         "bin_folder": bin_files,
-        "arduino15_folder": data_files
+        "arduino_data_folder": data_files,
+        "packages_folder": pkg_files
     })
 
 # ── Compile ───────────────────────────────────────────────────────
@@ -103,6 +126,7 @@ def compile_code():
         os.makedirs(sketch_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
+        # .ino filename MUST match folder name exactly
         ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
@@ -112,10 +136,8 @@ def compile_code():
         print(f"[COMPILE] Sketch={ino_path}")
 
         result = subprocess.run(
-            [ARDUINO_CLI, "compile",
-             "--fqbn", board,
-             "--output-dir", output_dir,
-             sketch_dir],
+            get_cli_cmd(["compile", "--fqbn", board,
+                         "--output-dir", output_dir, sketch_dir]),
             capture_output=True, text=True, timeout=120
         )
 
