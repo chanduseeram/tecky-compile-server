@@ -8,7 +8,12 @@ import tempfile
 
 app = Flask(__name__)
 
-ARDUINO_CLI = "arduino-cli"
+# arduino-cli installed to /opt/arduino-cli/ during Render build
+# Falls back to PATH if running locally
+ARDUINO_CLI = "/opt/arduino-cli/arduino-cli"
+if not os.path.exists(ARDUINO_CLI):
+    ARDUINO_CLI = "arduino-cli"   # local dev fallback
+
 BUILD_DIR = tempfile.gettempdir()
 
 # ── Health / ping ─────────────────────────────────────────────────
@@ -40,13 +45,12 @@ def compile_code():
     board     = data['board']
     proj_name = data.get('projectName', 'RobotSketch')
 
-    # Sanitize
     proj_name = ''.join(c for c in proj_name if c.isalnum() or c == '_')
     if not proj_name:
         proj_name = 'RobotSketch'
 
     job_id      = str(uuid.uuid4())[:8]
-    sketch_name = f"{proj_name}_{job_id}"        # e.g. RobotSketch_a1b2c3d4
+    sketch_name = f"{proj_name}_{job_id}"
     sketch_dir  = os.path.join(BUILD_DIR, sketch_name)
     output_dir  = os.path.join(sketch_dir, "build")
 
@@ -55,13 +59,11 @@ def compile_code():
         os.makedirs(output_dir, exist_ok=True)
 
         # FIX: .ino filename MUST match folder name exactly
-        # Folder = RobotSketch_a1b2c3d4
-        # File   = RobotSketch_a1b2c3d4.ino  ← must be same
         ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
-        print(f"[COMPILE] Board={board}  Sketch={ino_path}")
+        print(f"[COMPILE] CLI={ARDUINO_CLI} Board={board} Sketch={ino_path}")
 
         result = subprocess.run(
             [ARDUINO_CLI, "compile",
@@ -101,11 +103,10 @@ def compile_code():
         })
 
     except subprocess.TimeoutExpired:
-        return jsonify({"success": False,
-                        "error": "Compile timeout (>2 min)"}), 200
+        return jsonify({"success": False, "error": "Compile timeout (>2 min)"}), 200
     except FileNotFoundError:
         return jsonify({"success": False,
-                        "error": "arduino-cli not found on server"}), 200
+                        "error": f"arduino-cli not found at {ARDUINO_CLI}"}), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
     finally:
@@ -138,5 +139,7 @@ def clean_error(raw):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    print(f"[SERVER] arduino-cli path: {ARDUINO_CLI}")
+    print(f"[SERVER] arduino-cli exists: {os.path.exists(ARDUINO_CLI)}")
     print(f"[SERVER] Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
