@@ -8,13 +8,17 @@ import tempfile
 
 app = Flask(__name__)
 
-# arduino-cli installed to /opt/arduino-cli/ during Render build
-# Falls back to PATH if running locally
-ARDUINO_CLI = "/opt/arduino-cli/arduino-cli"
+# Use project-relative bin folder — persists from build to runtime on Render
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ARDUINO_CLI = os.path.join(BASE_DIR, "bin", "arduino-cli")
+
 if not os.path.exists(ARDUINO_CLI):
-    ARDUINO_CLI = "arduino-cli"   # local dev fallback
+    ARDUINO_CLI = "arduino-cli"  # local dev fallback
 
 BUILD_DIR = tempfile.gettempdir()
+
+print(f"[SERVER] arduino-cli path: {ARDUINO_CLI}")
+print(f"[SERVER] arduino-cli exists: {os.path.exists(ARDUINO_CLI)}")
 
 # ── Health / ping ─────────────────────────────────────────────────
 @app.route('/ping', methods=['GET'])
@@ -23,7 +27,13 @@ def ping():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
+    cli_exists = os.path.exists(ARDUINO_CLI)
+    return jsonify({
+        "status": "ok",
+        "message": "Tecky Compile Server running",
+        "arduino_cli": ARDUINO_CLI,
+        "arduino_cli_exists": cli_exists
+    })
 
 @app.route('/', methods=['GET'])
 def root():
@@ -45,6 +55,7 @@ def compile_code():
     board     = data['board']
     proj_name = data.get('projectName', 'RobotSketch')
 
+    # Sanitize project name
     proj_name = ''.join(c for c in proj_name if c.isalnum() or c == '_')
     if not proj_name:
         proj_name = 'RobotSketch'
@@ -58,12 +69,15 @@ def compile_code():
         os.makedirs(sketch_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        # FIX: .ino filename MUST match folder name exactly
+        # .ino filename MUST match folder name exactly
         ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
-        print(f"[COMPILE] CLI={ARDUINO_CLI} Board={board} Sketch={ino_path}")
+        print(f"[COMPILE] CLI={ARDUINO_CLI}")
+        print(f"[COMPILE] Board={board}")
+        print(f"[COMPILE] Sketch={ino_path}")
+        print(f"[COMPILE] CLI exists={os.path.exists(ARDUINO_CLI)}")
 
         result = subprocess.run(
             [ARDUINO_CLI, "compile",
@@ -74,8 +88,8 @@ def compile_code():
         )
 
         print(f"[COMPILE] rc={result.returncode}")
-        print(f"[COMPILE] stdout={result.stdout}")
-        print(f"[COMPILE] stderr={result.stderr}")
+        print(f"[COMPILE] stdout={result.stdout[:500]}")
+        print(f"[COMPILE] stderr={result.stderr[:500]}")
 
         if result.returncode != 0:
             error_msg = result.stderr or result.stdout or "Unknown compile error"
@@ -117,6 +131,7 @@ def compile_code():
 
 
 def find_output_file(output_dir):
+    """Find compiled hex/bin file in output directory"""
     for ext in [".hex", ".bin", ".elf"]:
         for fname in os.listdir(output_dir):
             if fname.endswith(ext):
@@ -125,6 +140,7 @@ def find_output_file(output_dir):
 
 
 def clean_error(raw):
+    """Clean up arduino-cli error output"""
     lines = raw.strip().split('\n')
     useful = []
     for line in lines:
@@ -139,7 +155,5 @@ def clean_error(raw):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"[SERVER] arduino-cli path: {ARDUINO_CLI}")
-    print(f"[SERVER] arduino-cli exists: {os.path.exists(ARDUINO_CLI)}")
     print(f"[SERVER] Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
