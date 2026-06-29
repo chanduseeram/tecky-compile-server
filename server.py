@@ -39,6 +39,41 @@ def health():
 def root():
     return jsonify({"status": "ok", "message": "Tecky Compile Server running"})
 
+# ── Debug ─────────────────────────────────────────────────────────
+@app.route('/debug', methods=['GET'])
+def debug():
+    # Check core list
+    try:
+        result = subprocess.run(
+            [ARDUINO_CLI, "core", "list"],
+            capture_output=True, text=True, timeout=30
+        )
+        cores = result.stdout + result.stderr
+    except Exception as e:
+        cores = str(e)
+
+    # Check bin folder contents
+    bin_dir = os.path.join(BASE_DIR, "bin")
+    try:
+        bin_files = os.listdir(bin_dir)
+    except:
+        bin_files = "bin folder not found"
+
+    # Check arduino data dir
+    data_dir = os.path.join(BASE_DIR, ".arduino15")
+    try:
+        data_files = os.listdir(data_dir)
+    except:
+        data_files = ".arduino15 folder not found"
+
+    return jsonify({
+        "arduino_cli_path": ARDUINO_CLI,
+        "arduino_cli_exists": os.path.exists(ARDUINO_CLI),
+        "cores_installed": cores,
+        "bin_folder": bin_files,
+        "arduino15_folder": data_files
+    })
+
 # ── Compile ───────────────────────────────────────────────────────
 @app.route('/compile', methods=['POST'])
 def compile_code():
@@ -55,7 +90,6 @@ def compile_code():
     board     = data['board']
     proj_name = data.get('projectName', 'RobotSketch')
 
-    # Sanitize project name
     proj_name = ''.join(c for c in proj_name if c.isalnum() or c == '_')
     if not proj_name:
         proj_name = 'RobotSketch'
@@ -69,7 +103,6 @@ def compile_code():
         os.makedirs(sketch_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        # .ino filename MUST match folder name exactly
         ino_path = os.path.join(sketch_dir, f"{sketch_name}.ino")
         with open(ino_path, 'w', encoding='utf-8') as f:
             f.write(code)
@@ -77,7 +110,6 @@ def compile_code():
         print(f"[COMPILE] CLI={ARDUINO_CLI}")
         print(f"[COMPILE] Board={board}")
         print(f"[COMPILE] Sketch={ino_path}")
-        print(f"[COMPILE] CLI exists={os.path.exists(ARDUINO_CLI)}")
 
         result = subprocess.run(
             [ARDUINO_CLI, "compile",
@@ -131,7 +163,6 @@ def compile_code():
 
 
 def find_output_file(output_dir):
-    """Find compiled hex/bin file in output directory"""
     for ext in [".hex", ".bin", ".elf"]:
         for fname in os.listdir(output_dir):
             if fname.endswith(ext):
@@ -140,7 +171,6 @@ def find_output_file(output_dir):
 
 
 def clean_error(raw):
-    """Clean up arduino-cli error output"""
     lines = raw.strip().split('\n')
     useful = []
     for line in lines:
@@ -157,33 +187,3 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"[SERVER] Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
-
-
-
-
-@app.route('/debug', methods=['GET'])
-def debug():
-    import subprocess
-    # Check core list
-    try:
-        result = subprocess.run(
-            [ARDUINO_CLI, "core", "list"],
-            capture_output=True, text=True, timeout=30
-        )
-        cores = result.stdout + result.stderr
-    except Exception as e:
-        cores = str(e)
-
-    # Check bin folder contents
-    bin_dir = os.path.join(BASE_DIR, "bin")
-    try:
-        bin_files = os.listdir(bin_dir)
-    except:
-        bin_files = "bin folder not found"
-
-    return jsonify({
-        "arduino_cli_path": ARDUINO_CLI,
-        "arduino_cli_exists": os.path.exists(ARDUINO_CLI),
-        "cores_installed": cores,
-        "bin_folder": bin_files
-    })
